@@ -1,0 +1,252 @@
+import turtle
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import deque
+import os
+
+# Setup the screen
+screen = turtle.Screen()
+screen.setup(width=350, height=600)
+screen.title("Reinforcement Learning with Turtle")
+screen.tracer(-1000)  # Turn off animation for faster performance
+
+# Create the agent
+agent = turtle.Turtle()
+agent.shape("circle")
+agent.shapesize(1.8)
+agent.color("red")
+agent.penup()
+agent.goto(0, -250)  # Start at the bottom center of the screen
+agent.setheading(90)  # Face upwards
+
+# Create obstacles with random speeds
+obstacles = []
+obstacle_speeds = []
+
+for _ in range(8):
+    obstacle = turtle.Turtle()
+    obstacle.shape("circle")
+    obstacle.shapesize(1.8)
+    obstacle.color("blue")
+    obstacle.penup()
+    x = random.randint(-160, 160)
+    y = random.randint(-50, 290)
+    obstacle.goto(x, y)
+    obstacles.append(obstacle)
+    # Initialize with random speeds
+    speed_x = random.uniform(-0.5, 0.5)
+    speed_y = random.uniform(-1, 0.8)
+    obstacle_speeds.append((speed_x, speed_y))
+
+# Movement for obstacles with random speeds
+def move_obstacles():
+    for i, obstacle in enumerate(obstacles):
+        # Change speed randomly each time
+        speed_x, speed_y = random.uniform(-0.5, 0.5), random.uniform(-1, 0.8)
+        new_x = obstacle.xcor() + random.uniform(-25, 25) * speed_x
+        new_y = obstacle.ycor() + random.uniform(-25, 25) * speed_y
+        # Ensure obstacles stay within the screen boundaries
+        if new_x < -200 or new_x > 200:  # 175
+            new_x = obstacle.xcor()
+        if new_y < -310 or new_y > 310:
+            new_y = obstacle.ycor()
+        obstacle.goto(new_x, new_y)
+
+# Define the actions for the agent
+actions = ["up", "left", "right", "stationary"]
+action_map = {
+    "up": 0,
+    "left": 1,
+    "right": 2,
+    "stationary": 3
+}
+
+def move_agent(action):
+    if action == "up":
+        agent.sety(agent.ycor() + 20)
+    elif action == "left":
+        normal_heading = agent.heading()
+        agent.setheading(agent.heading() + 30)
+        agent.forward(20)
+        agent.setheading(90)
+    elif action == "right":
+        agent.setheading(agent.heading() - 30)
+        agent.forward(20)
+        agent.setheading(90)
+    elif action == "stationary":
+        pass  # Do nothing
+
+# Check for collisions
+def check_collision():
+    for obstacle in obstacles:
+        if agent.distance(obstacle) < 18 * 1.7:
+            print('contact obstacle!!!')
+            return True
+    return False
+
+def hit_wall():
+    if agent.xcor() < -175 or agent.xcor() > 175:
+        print('contact the wall !!!')
+        return True
+    return False
+
+# Check if the agent reached the top
+def check_goal():
+    return agent.ycor() > 290
+
+# Reset the agent
+def reset_agent():
+    agent.goto(0, -250)
+    agent.setheading(90)  # Face upwards
+
+def reset_obstacles():
+    for ob in obstacles:
+        x = random.randint(-180, 180)
+        y = random.randint(-50, 290)
+        ob.goto(x, y)
+
+# Define the neural network for DQN
+class DQN(nn.Module):
+    def __init__(self):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(2, 24)
+        self.fc2 = nn.Linear(24, 24)
+        self.fc3 = nn.Linear(24, 4)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+
+# Initialize the DQN and optimizer
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+policy_net = DQN().to(device)
+target_net = DQN().to(device)
+
+# Load the model
+model_path = r"C:\Users\leo\pygame_pytorch\dqn_model_real.pth"
+if os.path.exists(model_path):
+    policy_net.load_state_dict(torch.load(model_path))
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
+    print("======================================")
+    print("Model loaded successfully from:")
+    print(model_path)
+    print("======================================")
+else:
+    print("======================================")
+    print("No pre-trained model found, starting from scratch")
+    print("======================================")
+
+optimizer = optim.Adam(policy_net.parameters(), lr=0.001)
+criterion = nn.MSELoss()
+
+# Replay memory
+memory = deque(maxlen=10000)
+
+def remember(state, action, reward, next_state, done):
+    memory.append((state, action, reward, next_state, done))
+
+def replay(batch_size):
+    if len(memory) < batch_size:
+        return
+    minibatch = random.sample(memory, batch_size)
+    for state, action, reward, next_state, done in minibatch:
+        state = torch.FloatTensor(state).to(device)
+        next_state = torch.FloatTensor(next_state).to(device)
+        reward = torch.FloatTensor([reward]).to(device)
+        action = torch.LongTensor([action]).to(device)
+        
+        target = reward
+        if not done:
+            target = reward + gamma * torch.max(target_net(next_state))
+
+        current = policy_net(state)[action]
+        loss = criterion(current, target)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+# Parameters
+alpha = 0.0005  # Learning rate
+gamma = 0.95  # Discount factor
+epsilon = 0.05  # Exploration rate
+batch_size = 32
+episodes = 10000
+update_target_every = 100
+save_model_every = 50  # Save model every 50 episodes
+
+def get_state():
+    return (agent.xcor(), agent.ycor())
+
+def choose_action(state):
+    if random.uniform(0, 1) < epsilon:
+        return random.choice(actions)
+    else:
+        state = torch.FloatTensor(state).to(device)
+        with torch.no_grad():
+            return actions[torch.argmax(policy_net(state)).item()]
+
+# Main game loop with DQN for 1000 episodes
+cumulative_reward = 0
+cumulative_rewards = []
+
+# ======================================
+# Start of Evaluation Metrics Section
+# ======================================
+for episode in range(episodes):
+    reset_agent()
+    reset_obstacles()
+    state = get_state()
+    successful_episode = False
+    episode_reward = 0
+    while True:
+        screen.update()
+        action = choose_action(state)
+        move_agent(action)
+        move_obstacles()
+        reward = -1 if check_collision() else 1 if check_goal() else 0 if hit_wall() else 0
+        next_state = get_state()
+        done = reward != 0 or hit_wall()
+        episode_reward += reward
+        remember(state, action_map[action], reward, next_state, done)
+        replay(batch_size)
+        state = next_state
+        if reward == 1:
+            print('Succeed')
+            successful_episode = True
+        if done:
+            break
+    cumulative_reward += episode_reward
+    cumulative_rewards.append(cumulative_reward)
+
+    # Update target network every `update_target_every` episodes
+    if episode % update_target_every == 0:
+        target_net.load_state_dict(policy_net.state_dict())
+        
+    # Save the model every `save_model_every` episodes
+    if episode % save_model_every == 0:
+        torch.save(policy_net.state_dict(), model_path)
+        print(f"Model saved at episode {episode}")
+
+    print(f"Episode {episode + 1} completed, Cumulative Reward: {cumulative_reward}")
+
+# Save the final model
+# torch.save(policy_net.state_dict(), model_path)
+# print("Final model saved")
+
+# Plot cumulative reward
+plt.plot(range(episodes), cumulative_rewards)
+plt.xlabel('Episodes')
+plt.ylabel('Cumulative Reward')
+plt.title('Cumulative Reward vs Episodes')
+plt.show()
+# ======================================
+# End of Evaluation Metrics Section
+# ======================================
+
+turtle.done()
