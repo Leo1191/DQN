@@ -1,0 +1,321 @@
+import turtle
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import deque
+import os
+
+# Setup the screen
+screen = turtle.Screen()
+screen.setup(width=350, height=600)
+screen.title("Reinforcement Learning with Turtle")
+screen.tracer(-1000)  # Turn off animation for faster performance
+
+# Create the agent
+agent = turtle.Turtle()
+agent.shape("circle")
+agent.shapesize(1.8)
+agent.color("red")
+agent.penup()
+agent.goto(0, -250)  # Start at the bottom center of the screen
+agent.setheading(90)  # Face upwards
+
+# Create obstacles with random speeds
+obstacles = []
+obstacle_speeds = []
+
+for _ in range(8):
+    obstacle = turtle.Turtle()
+    obstacle.shape("circle")
+    obstacle.shapesize(1.8)
+    obstacle.color("blue")
+    obstacle.penup()
+    x = random.randint(-160, 160)
+    y = random.randint(-50, 290)
+    obstacle.goto(x, y)
+    obstacles.append(obstacle)
+    # Initialize with random speeds
+    speed_x = random.uniform(-0.5, 0.5)
+    speed_y = random.uniform(-1, 0.8)
+    obstacle_speeds.append((speed_x, speed_y))
+
+# Movement for obstacles with random speeds
+def move_obstacles():
+    for i, obstacle in enumerate(obstacles):
+        # Change speed randomly each time
+        speed_x, speed_y = random.uniform(-0.5, 0.5), random.uniform(-1, 0.8)
+        new_x = obstacle.xcor() + random.uniform(-25, 25) * speed_x
+        new_y = obstacle.ycor() + random.uniform(-25, 25) * speed_y
+        # Ensure obstacles stay within the screen boundaries
+        if new_x < -200 or new_x > 200:  # 175
+            new_x = obstacle.xcor()
+        if new_y < -310 or new_y > 310:
+            new_y = obstacle.ycor()
+        obstacle.goto(new_x, new_y)
+
+# Define the actions for the agent
+actions = ["up", "left", "right", "stationary"]
+action_map = {
+    "up": 0,
+    "left": 1,
+    "right": 2,
+    "stationary": 3
+}
+reverse_action_map = {v: k for k, v in action_map.items()}
+
+def move_agent(action):
+    if action == "up":
+        agent.sety(agent.ycor() + 20)
+    elif action == "left":
+        normal_heading = agent.heading()
+        agent.setheading(agent.heading() + 30)
+        agent.forward(20)
+        agent.setheading(90)
+    elif action == "right":
+        agent.setheading(agent.heading() - 30)
+        agent.forward(20)
+        agent.setheading(90)
+    elif action == "stationary":
+        pass  # Do nothing
+
+# Check for collisions
+def check_collision():
+    for obstacle in obstacles:
+        if agent.distance(obstacle) < 18*1.7:
+            return True
+    return False
+
+def hit_wall():
+    if agent.xcor() < -175 or agent.xcor() > 175:
+        return True
+    return False
+
+# Check if the agent reached the top
+def check_goal():
+    return agent.ycor() > 290
+
+# Reset the agent
+def reset_agent():
+    agent.goto(0, -250)
+    agent.setheading(90)  # Face upwards
+
+def reset_obstacles():
+    for ob in obstacles:
+        x = random.randint(-180, 180)
+        y = random.randint(-50, 290)
+        ob.goto(x, y)
+
+# Define the neural network for DQN
+class DQN(nn.Module):
+    def __init__(self):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(2, 24)
+        self.fc2 = nn.Linear(24, 24)
+        self.fc3 = nn.Linear(24, 4)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+
+# Initialize the DQN and optimizer
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+policy_net = DQN().to(device)
+target_net = DQN().to(device)
+
+# # Load the model
+model_path = r"C:\Users\leo\pygame_pytorch\per_model_real.pth"
+if os.path.exists(model_path):
+    policy_net.load_state_dict(torch.load(model_path))
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
+    print("======================================")
+    print("Model loaded successfully from:")
+    print(model_path)
+    print("======================================")
+else:
+    print("======================================")
+    print("No pre-trained model found, starting from scratch")
+    print("======================================")
+
+optimizer = optim.Adam(policy_net.parameters(), lr=0.001)
+criterion = nn.MSELoss()
+
+# Prioritized Replay Memory
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.pos = 0
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.buffer = deque(maxlen=capacity)
+
+    def add(self, state, action, reward, next_state, done):
+        max_prio = self.priorities.max() if self.buffer else 1.0
+        if len(self.buffer) < self.capacity:
+            self.buffer.append((state, action, reward, next_state, done))
+        else:
+            self.buffer[self.pos] = (state, action, reward, next_state, done)
+        self.priorities[self.pos] = max_prio
+        self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        if len(self.buffer) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:self.pos]
+        probs = prios ** self.alpha
+        probs /= probs.sum()
+
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max()
+        weights = np.array(weights, dtype=np.float32)
+
+        states, actions, rewards, next_states, dones = zip(*samples)
+        return (torch.tensor(states, device=device, dtype=torch.float32),
+                torch.tensor(actions, device=device, dtype=torch.int64),
+                torch.tensor(rewards, device=device, dtype=torch.float32),
+                torch.tensor(next_states, device=device, dtype=torch.float32),
+                torch.tensor(dones, device=device, dtype=torch.uint8),
+                indices, weights)
+
+    def update_priorities(self, batch_indices, batch_priorities):
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
+
+# Replay memory
+memory = PrioritizedReplayBuffer(10000, alpha=0.6)
+
+def remember(state, action, reward, next_state, done):
+    memory.add(state, action, reward, next_state, done)
+
+def replay(batch_size):
+    if len(memory.buffer) < batch_size:
+        return
+    beta = min(1.0, beta_start + episode * (1.0 - beta_start) / beta_frames)
+    states, actions, rewards, next_states, dones, indices, weights = memory.sample(batch_size, beta)
+
+    q_values = policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+    next_q_values = target_net(next_states).max(1)[0]
+    expected_q_values = rewards + (1 - dones) * gamma * next_q_values
+
+    loss = (q_values - expected_q_values.detach()).pow(2) * torch.tensor(weights, device=device)
+    prios = loss + 1e-5
+    loss = loss.mean()
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    memory.update_priorities(indices, prios.data.cpu().numpy())
+
+# Parameters
+alpha = 0.0005  # Learning rate
+gamma = 0.95  # Discount factor
+epsilon = 0.05  # Exploration rate
+beta_start = 0.4
+beta_frames = 1000
+batch_size = 32
+episodes = 10000
+update_target_every = 100
+save_model_every = 50  # Save model every 50 episodes
+
+def get_state():
+    return [agent.xcor(), agent.ycor()]
+
+def choose_action(state):
+    if random.uniform(0, 1) < epsilon:
+        return random.choice(list(action_map.values()))
+    else:
+        state = torch.FloatTensor(state).to(device)
+        with torch.no_grad():
+            return torch.argmax(policy_net(state)).item()
+
+# Main game loop with DQN for 1000 episodes
+total_reward = 0
+success_rate = []
+collision_count = 0
+
+for episode in range(episodes):
+    reset_agent()
+    reset_obstacles()
+    state = get_state()
+    successful_episode = False
+    episode_reward = 0
+    while True:
+        screen.update()
+        action_idx = choose_action(state)
+        action = reverse_action_map[action_idx]
+        move_agent(action)
+        move_obstacles()
+        reward = -1 if check_collision() else 1 if check_goal() else 0 if hit_wall() else 0
+        next_state = get_state()
+        done = reward != 0 or hit_wall()
+        episode_reward += reward
+        memory.add(state, action_idx, reward, next_state, done)
+        
+        replay(batch_size)
+        
+        state = next_state
+        if reward == 1:
+            successful_episode = True
+        if done:
+            break
+    total_reward += episode_reward
+    success_rate.append(successful_episode)
+    
+    # Calculate success rate for the last 500 episodes
+    if episode >= 499:
+        avg_success_rate = np.mean(success_rate[-500:])
+        print(f"Episode {episode + 1} completed, Total Reward: {total_reward}, Average Success Rate (last 500 episodes): {avg_success_rate:.2f}")
+
+    # Update target network every `update_target_every` episodes
+    if episode % update_target_every == 0:
+        target_net.load_state_dict(policy_net.state_dict())
+        
+    # Save the model every `save_model_every` episodes
+    if episode % save_model_every == 0:
+        torch.save(policy_net.state_dict(), model_path)
+        print(f"Model saved at episode {episode}")
+
+    if check_collision() or hit_wall():
+        collision_count += 1
+
+    print(f"Episode {episode + 1} completed, Total Reward: {total_reward}")
+
+# Print final metrics
+total_success_rate = np.sum(success_rate) / episodes
+average_reward_per_episode = total_reward / episodes
+
+print(f"Total Success Rate: {total_success_rate:.2f}")
+print(f"Average Reward per Episode: {average_reward_per_episode:.2f}")
+print(f"Number of Collisions: {collision_count}")
+
+# Plot success rate
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(range(episodes), np.cumsum(success_rate) / (np.arange(episodes) + 1))
+plt.xlabel('Episodes')
+plt.ylabel('Success Rate')
+plt.title('Success Rate vs Episodes')
+plt.ylim(0, 1)
+plt.yticks(np.arange(0, 1.1, 0.1))
+
+# Plot average reward per episode
+plt.subplot(1, 2, 2)
+plt.plot(range(episodes), np.cumsum([total_reward / (i + 1) for i in range(episodes)]))
+plt.xlabel('Episodes')
+plt.ylabel('Average Reward per Episode')
+plt.title('Average Reward per Episode vs Episodes')
+
+plt.tight_layout()
+plt.show()
+
+turtle.done()
